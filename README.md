@@ -31,3 +31,10 @@ git clone --recursive https://github.com/jarrensj/time-lock-contract
 forge build
 forge test
 ```
+
+## Deploy
+
+```sh
+export ROBINHOOD_RPC_URL=<rpc url>
+forge script script/Deploy.s.sol --rpc-url robinhood --broadcast --private-key <key>
+```
