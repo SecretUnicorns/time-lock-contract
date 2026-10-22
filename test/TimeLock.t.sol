@@ -40,6 +40,39 @@ contract MockToken {
     }
 }
 
+/// An NFT from before ERC165, like CryptoKitties: no ERC721 interface id, and a
+/// `transfer(to, tokenId)` that moves a token the caller owns.
+contract MockLegacyNFT {
+    mapping(uint256 => address) public ownerOf;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => bool)) public isApprovedForAll;
+
+    function mint(address to, uint256 id) external {
+        ownerOf[id] = to;
+        balanceOf[to]++;
+    }
+
+    function setApprovalForAll(address operator, bool approved) external {
+        isApprovedForAll[msg.sender][operator] = approved;
+    }
+
+    function transfer(address to, uint256 id) external {
+        _move(msg.sender, to, id);
+    }
+
+    function transferFrom(address from, address to, uint256 id) external {
+        require(msg.sender == from || isApprovedForAll[from][msg.sender], "not approved");
+        _move(from, to, id);
+    }
+
+    function _move(address from, address to, uint256 id) private {
+        require(ownerOf[id] == from, "not owner");
+        balanceOf[from]--;
+        balanceOf[to]++;
+        ownerOf[id] = to;
+    }
+}
+
 contract MockNFT {
     mapping(uint256 => address) public ownerOf;
     mapping(uint256 => address) public getApproved;
@@ -251,6 +284,27 @@ contract TimeLockTest is Test {
         vm.expectRevert(TimeLock.WrongAssetType.selector);
         lock.depositERC721(address(token), 5 ether, block.timestamp + 1, address(0));
         assertEq(token.balanceOf(alice), 1_000 ether);
+    }
+
+    function test_ERC20DepositRejectsNFTWithoutERC165() public {
+        MockLegacyNFT kitty = new MockLegacyNFT();
+        kitty.mint(alice, 1);
+        kitty.mint(bob, 7);
+        vm.prank(alice);
+        kitty.setApprovalForAll(address(lock), true);
+        vm.prank(bob);
+        kitty.setApprovalForAll(address(lock), true);
+
+        vm.prank(alice);
+        lock.depositERC721(address(kitty), 1, block.timestamp + 10, address(0));
+
+        // Accepted as an ERC20 lock of amount 1, withdrawing it would call transfer(bob, 1) and hand
+        // bob alice's NFT.
+        vm.prank(bob);
+        vm.expectRevert(TimeLock.WrongAssetType.selector);
+        lock.deposit(address(kitty), 7, block.timestamp + 1, address(0));
+        assertEq(kitty.ownerOf(7), bob);
+        assertEq(kitty.ownerOf(1), address(lock));
     }
 
     function test_MixedLocksShareIdSpace() public {

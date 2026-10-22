@@ -83,7 +83,9 @@ contract TimeLock {
         returns (uint256 lockId)
     {
         if (amount == 0) revert ZeroAmount();
-        // An NFT deposited here could never come back out: withdraw would call ERC20 transfer.
+        // NFTs must use depositERC721: withdraw here calls ERC20 `transfer(withdrawer, amount)`, which on
+        // an NFT either fails or moves token id `amount`, possibly someone else's. This catches NFTs that
+        // report ERC721 through ERC165...
         if (_isERC721(token)) revert WrongAssetType();
         withdrawer = _checkLockParams(unlockTime, withdrawer);
 
@@ -92,6 +94,8 @@ contract TimeLock {
         _safeTransferFrom(token, msg.sender, address(this), amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - before;
         if (received == 0) revert ZeroAmount();
+        // ...and this catches older ones that don't: if this contract now owns token id `amount`, it was an NFT.
+        if (_ownerOf(token, amount) == address(this)) revert WrongAssetType();
 
         lockId = _locks.length;
         _locks.push(
