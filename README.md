@@ -34,7 +34,26 @@ forge test
 
 ## Deploy
 
+Deploy to Robinhood Chain testnet first, then mainnet. The deployer needs ETH on that network for gas; get testnet ETH from the [testnet faucet](https://faucet.testnet.chain.robinhood.com).
+
+Import the deployer's key once into an encrypted keystore, so it never sits in your shell history:
+
 ```sh
-export ROBINHOOD_RPC_URL=<rpc url>
-forge script script/Deploy.s.sol --rpc-url robinhood --broadcast --private-key <key>
+cast wallet import deployer --interactive
 ```
+
+**Testnet** (chain ID 46630):
+
+```sh
+forge script script/Deploy.s.sol --rpc-url robinhood_testnet --account deployer --broadcast \
+  --verify --verifier blockscout --verifier-url https://explorer.testnet.chain.robinhood.com/api/
+```
+
+**Mainnet** (chain ID 4663):
+
+```sh
+forge script script/Deploy.s.sol --rpc-url robinhood --account deployer --broadcast \
+  --verify --verifier blockscout --verifier-url https://robinhoodchain.blockscout.com/api/
+```
+
+The script logs the deployed address, and `--verify` publishes the source on the [testnet explorer](https://explorer.testnet.chain.robinhood.com) or [mainnet explorer](https://robinhoodchain.blockscout.com). Leave out `--broadcast` for a dry run. The public RPCs in `foundry.toml` are rate-limited; to use your own (e.g. Alchemy), pass its URL to `--rpc-url` instead.
