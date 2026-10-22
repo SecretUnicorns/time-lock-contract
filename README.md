@@ -19,6 +19,7 @@ The unlock time is compared against `block.timestamp`, the time of the block a w
 
 ### Notes
 
+- Only ERC20s can be locked. `deposit` rejects NFTs (ERC721), which share ERC20's `transferFrom` and would otherwise get stuck.
 - Fee-on-transfer tokens: the lock records the amount actually received, not the amount requested.
 - Rebasing tokens aren't supported. If the contract's balance shrinks, later withdrawals of that token could fail.
 

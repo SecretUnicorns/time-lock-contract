@@ -40,6 +40,38 @@ contract MockToken {
     }
 }
 
+/// A minimal ERC721. Like older NFTs (CryptoKitties), it also has `transfer(to, tokenId)`.
+contract MockNFT {
+    mapping(uint256 => address) public ownerOf;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => bool)) public isApprovedForAll;
+
+    function mint(address to, uint256 id) external {
+        ownerOf[id] = to;
+        balanceOf[to]++;
+    }
+
+    function setApprovalForAll(address operator, bool approved) external {
+        isApprovedForAll[msg.sender][operator] = approved;
+    }
+
+    function transfer(address to, uint256 id) external {
+        _move(msg.sender, to, id);
+    }
+
+    function transferFrom(address from, address to, uint256 id) external {
+        require(msg.sender == from || isApprovedForAll[from][msg.sender], "not approved");
+        _move(from, to, id);
+    }
+
+    function _move(address from, address to, uint256 id) private {
+        require(ownerOf[id] == from, "not owner");
+        balanceOf[from]--;
+        balanceOf[to]++;
+        ownerOf[id] = to;
+    }
+}
+
 contract TimeLockTest is Test {
     TimeLock lock;
     MockToken token;
@@ -122,6 +154,20 @@ contract TimeLockTest is Test {
         token.setFee(100); // 1%
         uint256 id = _deposit(100 ether, block.timestamp + 1, address(0));
         assertEq(lock.getLock(id).amount, 99 ether);
+    }
+
+    function test_DepositRejectsNFT() public {
+        MockNFT nft = new MockNFT();
+        nft.mint(alice, 7);
+        vm.startPrank(alice);
+        nft.setApprovalForAll(address(lock), true);
+
+        // An NFT's transferFrom has the same signature as an ERC20's. Without the check this would lock
+        // as an ERC20 of amount 1, and withdrawing would call transfer(alice, 1): stuck for a modern NFT,
+        // or NFT #1 of the collection, possibly someone else's, for one with `transfer` like this mock.
+        vm.expectRevert(TimeLock.NotERC20.selector);
+        lock.deposit(address(nft), 7, block.timestamp + 1, address(0));
+        assertEq(nft.ownerOf(7), alice);
     }
 
     function test_LocksAreIsolated() public {
