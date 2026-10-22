@@ -145,4 +145,87 @@ contract TimeLockTest is Test {
         lock.withdraw(id);
         assertEq(token.balanceOf(bob), amount);
     }
+
+    function test_DepositorCanUpdateWithdrawer() public {
+        uint256 unlockTime = block.timestamp + 10;
+        uint256 id = _deposit(100 ether, unlockTime, bob);
+        address carol = makeAddr("carol");
+
+        vm.expectEmit(address(lock));
+        emit TimeLock.WithdrawerUpdated(id, bob, carol);
+        vm.prank(alice);
+        lock.updateWithdrawer(id, carol);
+        assertEq(lock.getLock(id).withdrawer, carol);
+
+        vm.warp(unlockTime);
+        vm.prank(bob);
+        vm.expectRevert(TimeLock.NotWithdrawer.selector);
+        lock.withdraw(id);
+        vm.prank(carol);
+        lock.withdraw(id);
+        assertEq(token.balanceOf(carol), 100 ether);
+    }
+
+    function test_WithdrawerCanUpdateWithdrawer() public {
+        uint256 id = _deposit(1 ether, block.timestamp + 1, bob);
+        address carol = makeAddr("carol");
+        vm.prank(bob);
+        lock.updateWithdrawer(id, carol);
+        assertEq(lock.getLock(id).withdrawer, carol);
+
+        // Bob is no longer the withdrawer, so Bob can't change it back.
+        vm.prank(bob);
+        vm.expectRevert(TimeLock.NotDepositorOrWithdrawer.selector);
+        lock.updateWithdrawer(id, bob);
+    }
+
+    function test_DepositorKeepsControlAfterWithdrawerChanges() public {
+        uint256 id = _deposit(1 ether, block.timestamp + 1, bob);
+        address carol = makeAddr("carol");
+        vm.prank(bob);
+        lock.updateWithdrawer(id, carol);
+
+        // The README's caveat: a lock made out to someone else can still be redirected by the depositor.
+        vm.prank(alice);
+        lock.updateWithdrawer(id, alice);
+        assertEq(lock.getLock(id).withdrawer, alice);
+    }
+
+    function test_OthersCannotUpdateWithdrawer() public {
+        uint256 id = _deposit(1 ether, block.timestamp + 1, address(0));
+        vm.prank(bob);
+        vm.expectRevert(TimeLock.NotDepositorOrWithdrawer.selector);
+        lock.updateWithdrawer(id, bob);
+    }
+
+    function test_UpdateWithdrawerRejectsZeroAddressAndUnknownLock() public {
+        uint256 id = _deposit(1 ether, block.timestamp + 1, address(0));
+        vm.startPrank(alice);
+        vm.expectRevert(TimeLock.ZeroAddress.selector);
+        lock.updateWithdrawer(id, address(0));
+        vm.expectRevert(TimeLock.InvalidLock.selector);
+        lock.updateWithdrawer(id + 1, bob);
+    }
+
+    function test_CannotUpdateWithdrawerAfterWithdraw() public {
+        uint256 id = _deposit(1 ether, block.timestamp + 1, address(0));
+        vm.warp(block.timestamp + 1);
+        vm.startPrank(alice);
+        lock.withdraw(id);
+        vm.expectRevert(TimeLock.AlreadyWithdrawn.selector);
+        lock.updateWithdrawer(id, bob);
+    }
+
+    function test_UpdateWithdrawerKeepsUnlockTime() public {
+        uint256 unlockTime = block.timestamp + 10;
+        uint256 id = _deposit(1 ether, unlockTime, address(0));
+        vm.prank(alice);
+        lock.updateWithdrawer(id, bob);
+        assertEq(lock.getLock(id).unlockTime, unlockTime);
+
+        vm.warp(unlockTime - 1);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(TimeLock.StillLocked.selector, unlockTime, unlockTime - 1));
+        lock.withdraw(id);
+    }
 }

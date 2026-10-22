@@ -7,7 +7,8 @@ interface IERC20 {
 
 /// @title TimeLock
 /// @notice Lock any ERC20 until a given time. Only the designated withdrawer can
-///         claim the tokens, and only once the unlock time has been reached.
+///         claim the tokens, and only once the unlock time has been reached. The depositor
+///         or withdrawer can change the withdrawer; the unlock time can never be changed.
 contract TimeLock {
     struct Lock {
         address token;
@@ -30,6 +31,7 @@ contract TimeLock {
         uint256 unlockTime
     );
     event Withdrawn(uint256 indexed lockId, address indexed token, address indexed withdrawer, uint256 amount);
+    event WithdrawerUpdated(uint256 indexed lockId, address indexed oldWithdrawer, address indexed newWithdrawer);
 
     error ZeroAmount();
     error UnlockTimeNotInFuture(uint256 unlockTime, uint256 currentTime);
@@ -37,6 +39,8 @@ contract TimeLock {
     error NotWithdrawer();
     error StillLocked(uint256 unlockTime, uint256 currentTime);
     error AlreadyWithdrawn();
+    error NotDepositorOrWithdrawer();
+    error ZeroAddress();
     error TransferFailed();
     error Reentrancy();
 
@@ -92,6 +96,20 @@ contract TimeLock {
         _safeTransfer(l.token, l.withdrawer, l.amount);
 
         emit Withdrawn(lockId, l.token, l.withdrawer, l.amount);
+    }
+
+    /// @notice Change who can withdraw a lock. Callable by the depositor or the current withdrawer.
+    ///         The unlock time stays the same.
+    function updateWithdrawer(uint256 lockId, address newWithdrawer) external {
+        if (lockId >= _locks.length) revert InvalidLock();
+        if (newWithdrawer == address(0)) revert ZeroAddress();
+        Lock storage l = _locks[lockId];
+        if (msg.sender != l.depositor && msg.sender != l.withdrawer) revert NotDepositorOrWithdrawer();
+        if (l.withdrawn) revert AlreadyWithdrawn();
+
+        address oldWithdrawer = l.withdrawer;
+        l.withdrawer = newWithdrawer;
+        emit WithdrawerUpdated(lockId, oldWithdrawer, newWithdrawer);
     }
 
     function getLock(uint256 lockId) external view returns (Lock memory) {

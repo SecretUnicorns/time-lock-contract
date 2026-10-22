@@ -11,7 +11,11 @@ Lock any ERC20 token (e.g. tokens launched on pons.family) until a chosen time o
    - Returns a `lockId` (also emitted in the `Deposited` event).
 3. **Withdraw**: once `block.timestamp >= unlockTime`, the withdrawer calls `withdraw(lockId)` and the tokens are sent to them.
 
-Each deposit is its own lock. Nobody else (not even the depositor, if they named a different withdrawer) can touch it, and there's no owner/admin.
+4. **Change the withdrawer** (optional): the depositor or the current withdrawer can call `updateWithdrawer(lockId, newWithdrawer)` any time before the lock is withdrawn.
+
+Each deposit is its own lock. Only the withdrawer can withdraw, and there's no owner/admin. The unlock time is fixed at deposit and can't be changed by anyone.
+
+Because the depositor can always change the withdrawer, a lock made out to someone else isn't guaranteed to them until they withdraw it.
 
 ### Timing
 
