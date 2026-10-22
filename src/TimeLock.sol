@@ -32,6 +32,7 @@ contract TimeLock {
     event Withdrawn(uint256 indexed lockId, address indexed token, address indexed withdrawer, uint256 amount);
 
     error ZeroAmount();
+    error NotERC20();
     error UnlockTimeNotInFuture(uint256 unlockTime, uint256 currentTime);
     error InvalidLock();
     error NotWithdrawer();
@@ -64,6 +65,10 @@ contract TimeLock {
         _safeTransferFrom(token, msg.sender, address(this), amount);
         uint256 received = IERC20(token).balanceOf(address(this)) - before;
         if (received == 0) revert ZeroAmount();
+        // An NFT gets this far, since ERC721 has the same transferFrom. Withdrawing it would call
+        // transfer(withdrawer, amount), which on an NFT fails or moves token id `amount`, possibly
+        // someone else's. If this contract now owns token id `amount`, it was an NFT.
+        if (_ownerOf(token, amount) == address(this)) revert NotERC20();
 
         lockId = _locks.length;
         _locks.push(
@@ -116,5 +121,12 @@ contract TimeLock {
         if (token.code.length == 0) revert TransferFailed();
         (bool ok, bytes memory ret) = token.call(data);
         if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TransferFailed();
+    }
+
+    /// @dev The ERC721 owner of `tokenId`, or address(0) if `token` has no `ownerOf` (e.g. an ERC20).
+    function _ownerOf(address token, uint256 tokenId) private view returns (address) {
+        (bool ok, bytes memory ret) = token.staticcall(abi.encodeWithSignature("ownerOf(uint256)", tokenId));
+        if (!ok || ret.length != 32) return address(0);
+        return address(uint160(abi.decode(ret, (uint256))));
     }
 }
