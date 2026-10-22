@@ -19,11 +19,13 @@ Because the depositor can always change the withdrawer, a lock made out to someo
 
 ### Flash loans (opt-in)
 
-The depositor or withdrawer of a lock can let others flash-loan its tokens, meaning borrow them and pay them back in the same transaction, for an ETH fee per loan.
+The depositor or withdrawer of a lock can let others flash-loan its tokens, meaning borrow them and pay them back in the same transaction, for a fee per loan in ETH or an ERC20 such as a stablecoin.
 
-- **Opt in**: `setFlashLoanTerms(lockId, true, fee)`, where `fee` is in wei (`10000000000000000` = 0.01 ETH). Call it again to change the fee, or pass `false` to opt out.
-- **Borrow**: `flashLoan(lockId, amount, receiver, data)` with exactly the lock's fee as `msg.value`, for up to the lock's amount. `receiver` must implement `ITimeLockFlashBorrower.onFlashLoan`, approve the TimeLock to take `amount` back, and return `FLASH_LOAN_CALLBACK_SUCCESS`. If the tokens don't come back, the whole transaction reverts.
-- **Collect fees**: each loan's fee is credited to the lock's withdrawer at the time of the loan. `feesOwed(address)` shows the balance, and `claimFees()` sends it to the caller.
+- **Opt in**: `setFlashLoanTerms(lockId, true, feeToken, fee)`. `feeToken` is `address(0)` for ETH or the ERC20 to charge in, and `fee` is in that token's smallest unit (for ETH, wei: `10000000000000000` = 0.01 ETH). Call it again to change the terms, or pass `false` to opt out.
+- **Borrow**: `flashLoan(lockId, amount, receiver, data, feeToken, fee)` for up to the lock's amount, passing the lock's current fee terms. If they've changed, the loan reverts with `FeeTermsChanged`, so a change sent just before can't charge you more. Pay an ETH fee as `msg.value`; an ERC20 fee is taken from the caller, so approve the TimeLock for it first. `receiver` must implement `ITimeLockFlashBorrower.onFlashLoan`, approve the TimeLock to take `amount` back, and return `FLASH_LOAN_CALLBACK_SUCCESS`. If the tokens don't come back, the whole transaction reverts.
+- **Collect fees**: each loan's fee is credited to the lock's withdrawer at the time of the loan. `feesOwed(withdrawer, feeToken)` shows the balance, and `claimFees(feeToken)` sends it to the caller.
+
+**Stablecoin fees on Robinhood Chain**: Robinhood Chain's [token contracts page](https://docs.robinhood.com/chain/contracts/) lists USDG (`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`) as its stablecoin. Circle's [USDC address list](https://developers.circle.com/stablecoins/usdc-contract-addresses) doesn't include Robinhood Chain yet; once USDC is deployed there, pass its address as `feeToken` the same way. Check the token's `decimals()` when setting `fee`.
 
 A loan can't take tokens out of a lock or change it, and the borrower can't deposit or withdraw during the loan. For the length of the transaction, though, the borrower does hold the tokens, so anything that checks balances mid-transaction (some airdrop claims or votes) will count them as the borrower's. Don't opt in a lock if that matters for its token.
 

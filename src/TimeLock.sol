@@ -19,7 +19,8 @@ interface ITimeLockFlashBorrower {
 /// @notice Lock any ERC20 until a given time. Only the designated withdrawer can
 ///         claim the tokens, and only once the unlock time has been reached. The depositor
 ///         or withdrawer can change the withdrawer; the unlock time can never be changed.
-///         Locks can opt in to flash loans, which pay the withdrawer an ETH fee per loan.
+///         Locks can opt in to flash loans, which pay the withdrawer a fee per loan in ETH
+///         or an ERC20 such as a stablecoin.
 contract TimeLock {
     struct Lock {
         address token;
@@ -29,7 +30,8 @@ contract TimeLock {
         uint256 unlockTime;
         bool withdrawn;
         bool flashLoanEnabled; // set with setFlashLoanTerms
-        uint256 flashLoanFee; // ETH (wei) a borrower pays per flash loan
+        address flashLoanFeeToken; // address(0) for ETH, else the ERC20 the fee is paid in
+        uint256 flashLoanFee; // per flash loan, in wei or the fee token's smallest unit
     }
 
     bytes32 public constant FLASH_LOAN_CALLBACK_SUCCESS = keccak256("ITimeLockFlashBorrower.onFlashLoan");
@@ -37,8 +39,9 @@ contract TimeLock {
     Lock[] private _locks;
     uint256 private _entered = 1;
 
-    /// @notice Flash loan fees (ETH) earned by each withdrawer and not yet claimed.
-    mapping(address => uint256) public feesOwed;
+    /// @notice Flash loan fees earned by each withdrawer and not yet claimed, per fee token
+    ///         (address(0) for ETH).
+    mapping(address => mapping(address => uint256)) public feesOwed;
 
     event Deposited(
         uint256 indexed lockId,
@@ -50,16 +53,17 @@ contract TimeLock {
     );
     event Withdrawn(uint256 indexed lockId, address indexed token, address indexed withdrawer, uint256 amount);
     event WithdrawerUpdated(uint256 indexed lockId, address indexed oldWithdrawer, address indexed newWithdrawer);
-    event FlashLoanTermsUpdated(uint256 indexed lockId, bool enabled, uint256 fee);
+    event FlashLoanTermsUpdated(uint256 indexed lockId, bool enabled, address feeToken, uint256 fee);
     event FlashLoan(
         uint256 indexed lockId,
         address indexed token,
         address indexed receiver,
         address initiator,
         uint256 amount,
+        address feeToken,
         uint256 fee
     );
-    event FeesClaimed(address indexed withdrawer, uint256 amount);
+    event FeesClaimed(address indexed withdrawer, address indexed feeToken, uint256 amount);
 
     error ZeroAmount();
     error UnlockTimeNotInFuture(uint256 unlockTime, uint256 currentTime);
@@ -74,6 +78,7 @@ contract TimeLock {
     error FlashLoanDisabled();
     error AmountExceedsLock(uint256 amount, uint256 lockAmount);
     error WrongFee(uint256 sent, uint256 fee);
+    error FeeTermsChanged(address feeToken, uint256 fee);
     error FlashLoanCallbackFailed();
     error FlashLoanNotRepaid();
     error NoFees();
@@ -113,6 +118,7 @@ contract TimeLock {
                 unlockTime: unlockTime,
                 withdrawn: false,
                 flashLoanEnabled: false,
+                flashLoanFeeToken: address(0),
                 flashLoanFee: 0
             })
         );
@@ -148,34 +154,46 @@ contract TimeLock {
         emit WithdrawerUpdated(lockId, oldWithdrawer, newWithdrawer);
     }
 
-    /// @notice Opt a lock in or out of flash loans and set the ETH fee per loan.
-    ///         Callable by the depositor or the current withdrawer. Fees go to the withdrawer.
-    function setFlashLoanTerms(uint256 lockId, bool enabled, uint256 fee) external {
+    /// @notice Opt a lock in or out of flash loans and set the fee per loan, paid in
+    ///         `feeToken` (address(0) for ETH). Callable by the depositor or the current withdrawer.
+    ///         Fees go to the withdrawer.
+    function setFlashLoanTerms(uint256 lockId, bool enabled, address feeToken, uint256 fee) external {
         if (lockId >= _locks.length) revert InvalidLock();
         Lock storage l = _locks[lockId];
         if (msg.sender != l.depositor && msg.sender != l.withdrawer) revert NotDepositorOrWithdrawer();
         if (l.withdrawn) revert AlreadyWithdrawn();
 
         l.flashLoanEnabled = enabled;
+        l.flashLoanFeeToken = feeToken;
         l.flashLoanFee = fee;
-        emit FlashLoanTermsUpdated(lockId, enabled, fee);
+        emit FlashLoanTermsUpdated(lockId, enabled, feeToken, fee);
     }
 
-    /// @notice Borrow up to a lock's tokens and return them in the same transaction. Send exactly
-    ///         the lock's `flashLoanFee` as msg.value. `receiver` gets `amount`, its `onFlashLoan`
-    ///         is called, and then `amount` is pulled back from `receiver`.
-    function flashLoan(uint256 lockId, uint256 amount, address receiver, bytes calldata data)
-        external
-        payable
-        nonReentrant
-    {
+    /// @notice Borrow up to a lock's tokens and return them in the same transaction. Pass the lock's
+    ///         current `feeToken` and `fee`. Pay an ETH fee as msg.value; an ERC20 fee is taken from
+    ///         the caller, so approve it first. `receiver` gets `amount`, its `onFlashLoan` is called,
+    ///         and then `amount` is pulled back from `receiver`.
+    function flashLoan(
+        uint256 lockId,
+        uint256 amount,
+        address receiver,
+        bytes calldata data,
+        address feeToken,
+        uint256 fee
+    ) external payable nonReentrant {
         if (lockId >= _locks.length) revert InvalidLock();
         Lock storage l = _locks[lockId];
         if (!l.flashLoanEnabled) revert FlashLoanDisabled();
         if (l.withdrawn) revert AlreadyWithdrawn();
         if (amount == 0) revert ZeroAmount();
         if (amount > l.amount) revert AmountExceedsLock(amount, l.amount);
-        if (msg.value != l.flashLoanFee) revert WrongFee(msg.value, l.flashLoanFee);
+        // The caller names the terms they agreed to, so changing the fee or fee token just before
+        // a loan lands can't charge them more or take a different token they've approved.
+        if (feeToken != l.flashLoanFeeToken || fee != l.flashLoanFee) {
+            revert FeeTermsChanged(l.flashLoanFeeToken, l.flashLoanFee);
+        }
+        // Collected before the loan, so a fee in the borrowed token doesn't count as repayment.
+        uint256 feePaid = _collectFee(feeToken, fee);
 
         address token = l.token;
         uint256 before = IERC20(token).balanceOf(address(this));
@@ -186,21 +204,26 @@ contract TimeLock {
         // Pulling back `amount` can still leave the contract short, e.g. with fee-on-transfer tokens.
         if (IERC20(token).balanceOf(address(this)) < before) revert FlashLoanNotRepaid();
 
-        // TODO: Revisit the fee model. For now it's a flat ETH fee per loan whatever the amount, and a loan
+        // TODO: Revisit the fee model. For now it's a flat fee per loan whatever the amount, and a loan
         //       draws on a single lock. A fee proportional to the amount, or loans pooled across locks of the
         //       same token, may suit borrowers and lockers better.
-        feesOwed[l.withdrawer] += msg.value;
-        emit FlashLoan(lockId, token, receiver, msg.sender, amount, msg.value);
+        feesOwed[l.withdrawer][feeToken] += feePaid;
+        emit FlashLoan(lockId, token, receiver, msg.sender, amount, feeToken, feePaid);
     }
 
-    /// @notice Send the caller the flash loan fees they've earned as a withdrawer.
-    function claimFees() external nonReentrant {
-        uint256 owed = feesOwed[msg.sender];
+    /// @notice Send the caller the flash loan fees they've earned as a withdrawer in `feeToken`
+    ///         (address(0) for ETH).
+    function claimFees(address feeToken) external nonReentrant {
+        uint256 owed = feesOwed[msg.sender][feeToken];
         if (owed == 0) revert NoFees();
-        feesOwed[msg.sender] = 0;
-        (bool ok,) = msg.sender.call{value: owed}("");
-        if (!ok) revert TransferFailed();
-        emit FeesClaimed(msg.sender, owed);
+        feesOwed[msg.sender][feeToken] = 0;
+        if (feeToken == address(0)) {
+            (bool ok,) = msg.sender.call{value: owed}("");
+            if (!ok) revert TransferFailed();
+        } else {
+            _safeTransfer(feeToken, msg.sender, owed);
+        }
+        emit FeesClaimed(msg.sender, feeToken, owed);
     }
 
     function getLock(uint256 lockId) external view returns (Lock memory) {
@@ -210,6 +233,20 @@ contract TimeLock {
 
     function lockCount() external view returns (uint256) {
         return _locks.length;
+    }
+
+    /// @dev Takes a flash loan fee from the caller and returns how much arrived.
+    function _collectFee(address feeToken, uint256 fee) private returns (uint256) {
+        if (feeToken == address(0)) {
+            if (msg.value != fee) revert WrongFee(msg.value, fee);
+            return fee;
+        }
+        if (msg.value != 0) revert WrongFee(msg.value, 0);
+        if (fee == 0) return 0;
+        // Credit what arrived, in case the fee token takes a cut on transfer.
+        uint256 before = IERC20(feeToken).balanceOf(address(this));
+        _safeTransferFrom(feeToken, msg.sender, address(this), fee);
+        return IERC20(feeToken).balanceOf(address(this)) - before;
     }
 
     function _safeTransfer(address token, address to, uint256 amount) private {

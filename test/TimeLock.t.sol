@@ -79,6 +79,7 @@ contract TimeLockTest is Test {
     TimeLock lock;
     MockToken token;
     MockBorrower borrower;
+    MockToken stablecoin;
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
     address dave = makeAddr("dave");
@@ -92,16 +93,27 @@ contract TimeLockTest is Test {
 
         borrower = new MockBorrower(lock);
         vm.deal(dave, 1 ether);
+
+        // Stands in for USDG or USDC as a fee token.
+        stablecoin = new MockToken();
+        stablecoin.mint(dave, 100e6);
+        vm.prank(dave);
+        stablecoin.approve(address(lock), type(uint256).max);
     }
 
     function _optIn(uint256 lockId, uint256 fee) internal {
         vm.prank(alice);
-        lock.setFlashLoanTerms(lockId, true, fee);
+        lock.setFlashLoanTerms(lockId, true, address(0), fee);
     }
 
     function _borrow(uint256 lockId, uint256 amount, uint256 fee, MockBorrower.Action action) internal {
         vm.prank(dave);
-        lock.flashLoan{value: fee}(lockId, amount, address(borrower), abi.encode(action));
+        lock.flashLoan{value: fee}(lockId, amount, address(borrower), abi.encode(action), address(0), fee);
+    }
+
+    function _borrowPayingToken(uint256 lockId, uint256 amount, address feeToken, uint256 fee) internal {
+        vm.prank(dave);
+        lock.flashLoan(lockId, amount, address(borrower), abi.encode(MockBorrower.Action.Repay), feeToken, fee);
     }
 
     function _deposit(uint256 amount, uint256 unlockTime, address withdrawer) internal returns (uint256) {
@@ -285,14 +297,14 @@ contract TimeLockTest is Test {
         _optIn(id, 0.01 ether);
 
         vm.expectEmit(address(lock));
-        emit TimeLock.FlashLoan(id, address(token), address(borrower), dave, 100 ether, 0.01 ether);
+        emit TimeLock.FlashLoan(id, address(token), address(borrower), dave, 100 ether, address(0), 0.01 ether);
         _borrow(id, 100 ether, 0.01 ether, MockBorrower.Action.Repay);
 
         assertEq(borrower.balanceDuringLoan(), 100 ether);
         assertEq(borrower.initiator(), dave);
         assertEq(token.balanceOf(address(lock)), 100 ether);
-        assertEq(lock.feesOwed(bob), 0.01 ether);
-        assertEq(lock.feesOwed(alice), 0);
+        assertEq(lock.feesOwed(bob, address(0)), 0.01 ether);
+        assertEq(lock.feesOwed(alice, address(0)), 0);
 
         // The lock itself is untouched.
         vm.warp(unlockTime);
@@ -308,15 +320,15 @@ contract TimeLockTest is Test {
         _borrow(id, 50 ether, 0.01 ether, MockBorrower.Action.Repay);
 
         vm.expectEmit(address(lock));
-        emit TimeLock.FeesClaimed(bob, 0.02 ether);
+        emit TimeLock.FeesClaimed(bob, address(0), 0.02 ether);
         vm.startPrank(bob);
-        lock.claimFees();
+        lock.claimFees(address(0));
         assertEq(bob.balance, 0.02 ether);
-        assertEq(lock.feesOwed(bob), 0);
+        assertEq(lock.feesOwed(bob, address(0)), 0);
         assertEq(address(lock).balance, 0);
 
         vm.expectRevert(TimeLock.NoFees.selector);
-        lock.claimFees();
+        lock.claimFees(address(0));
     }
 
     function test_FeeGoesToCurrentWithdrawer() public {
@@ -325,8 +337,8 @@ contract TimeLockTest is Test {
         vm.prank(alice);
         lock.updateWithdrawer(id, bob);
         _borrow(id, 100 ether, 0.01 ether, MockBorrower.Action.Repay);
-        assertEq(lock.feesOwed(bob), 0.01 ether);
-        assertEq(lock.feesOwed(alice), 0);
+        assertEq(lock.feesOwed(bob, address(0)), 0.01 ether);
+        assertEq(lock.feesOwed(alice, address(0)), 0);
     }
 
     function test_FlashLoanRequiresOptIn() public {
@@ -338,20 +350,100 @@ contract TimeLockTest is Test {
         _borrow(id, 1 ether, 0, MockBorrower.Action.Repay);
 
         vm.expectEmit(address(lock));
-        emit TimeLock.FlashLoanTermsUpdated(id, false, 0);
+        emit TimeLock.FlashLoanTermsUpdated(id, false, address(0), 0);
         vm.prank(alice);
-        lock.setFlashLoanTerms(id, false, 0);
+        lock.setFlashLoanTerms(id, false, address(0), 0);
         vm.expectRevert(TimeLock.FlashLoanDisabled.selector);
         _borrow(id, 1 ether, 0, MockBorrower.Action.Repay);
     }
 
-    function test_FlashLoanRequiresExactFee() public {
+    function test_FlashLoanRequiresExactEthFee() public {
         uint256 id = _deposit(100 ether, block.timestamp + 10, address(0));
         _optIn(id, 0.01 ether);
+        bytes memory data = abi.encode(MockBorrower.Action.Repay);
+        vm.startPrank(dave);
         vm.expectRevert(abi.encodeWithSelector(TimeLock.WrongFee.selector, 0, 0.01 ether));
-        _borrow(id, 1 ether, 0, MockBorrower.Action.Repay);
+        lock.flashLoan(id, 1 ether, address(borrower), data, address(0), 0.01 ether);
         vm.expectRevert(abi.encodeWithSelector(TimeLock.WrongFee.selector, 0.02 ether, 0.01 ether));
-        _borrow(id, 1 ether, 0.02 ether, MockBorrower.Action.Repay);
+        lock.flashLoan{value: 0.02 ether}(id, 1 ether, address(borrower), data, address(0), 0.01 ether);
+    }
+
+    function test_FlashLoanRejectsChangedTerms() public {
+        uint256 id = _deposit(100 ether, block.timestamp + 10, address(0));
+        _optIn(id, 0.01 ether);
+
+        // The fee goes up before the borrower's loan lands.
+        _optIn(id, 0.02 ether);
+        vm.expectRevert(abi.encodeWithSelector(TimeLock.FeeTermsChanged.selector, address(0), 0.02 ether));
+        _borrow(id, 1 ether, 0.01 ether, MockBorrower.Action.Repay);
+
+        // The fee switches to a token the borrower has approved: nothing is taken.
+        vm.prank(alice);
+        lock.setFlashLoanTerms(id, true, address(stablecoin), 50e6);
+        vm.expectRevert(abi.encodeWithSelector(TimeLock.FeeTermsChanged.selector, address(stablecoin), 50e6));
+        _borrowPayingToken(id, 1 ether, address(stablecoin), 5e6);
+        assertEq(stablecoin.balanceOf(dave), 100e6);
+    }
+
+    function test_FlashLoanWithTokenFee() public {
+        uint256 id = _deposit(100 ether, block.timestamp + 10, bob);
+        vm.prank(alice);
+        lock.setFlashLoanTerms(id, true, address(stablecoin), 5e6);
+
+        vm.expectEmit(address(lock));
+        emit TimeLock.FlashLoan(id, address(token), address(borrower), dave, 100 ether, address(stablecoin), 5e6);
+        _borrowPayingToken(id, 100 ether, address(stablecoin), 5e6);
+        assertEq(stablecoin.balanceOf(dave), 95e6);
+        assertEq(lock.feesOwed(bob, address(stablecoin)), 5e6);
+        assertEq(lock.feesOwed(bob, address(0)), 0);
+        assertEq(token.balanceOf(address(lock)), 100 ether);
+
+        vm.expectEmit(address(lock));
+        emit TimeLock.FeesClaimed(bob, address(stablecoin), 5e6);
+        vm.prank(bob);
+        lock.claimFees(address(stablecoin));
+        assertEq(stablecoin.balanceOf(bob), 5e6);
+        assertEq(lock.feesOwed(bob, address(stablecoin)), 0);
+    }
+
+    function test_TokenFeeRejectsEth() public {
+        uint256 id = _deposit(100 ether, block.timestamp + 10, address(0));
+        vm.prank(alice);
+        lock.setFlashLoanTerms(id, true, address(stablecoin), 5e6);
+        vm.prank(dave);
+        vm.expectRevert(abi.encodeWithSelector(TimeLock.WrongFee.selector, 1 wei, 0));
+        lock.flashLoan{value: 1 wei}(
+            id, 1 ether, address(borrower), abi.encode(MockBorrower.Action.Repay), address(stablecoin), 5e6
+        );
+    }
+
+    function test_FeeInBorrowedTokenIsNotRepayment() public {
+        uint256 unlockTime = block.timestamp + 10;
+        uint256 id = _deposit(100 ether, unlockTime, address(0));
+        vm.prank(alice);
+        lock.setFlashLoanTerms(id, true, address(token), 2 ether);
+        token.mint(dave, 2 ether);
+        token.mint(address(borrower), 10 ether);
+        vm.prank(dave);
+        token.approve(address(lock), type(uint256).max);
+
+        // With a 1% cut on transfer the repayment arrives 1 short. The fee (1.98 after the cut) would
+        // cover that if it counted toward repayment, but it's collected before the loan.
+        token.setFee(100);
+        vm.expectRevert(TimeLock.FlashLoanNotRepaid.selector);
+        _borrowPayingToken(id, 100 ether, address(token), 2 ether);
+        token.setFee(0);
+
+        _borrowPayingToken(id, 100 ether, address(token), 2 ether);
+        assertEq(lock.feesOwed(alice, address(token)), 2 ether);
+        assertEq(token.balanceOf(address(lock)), 102 ether);
+
+        vm.warp(unlockTime);
+        vm.startPrank(alice);
+        lock.withdraw(id);
+        lock.claimFees(address(token));
+        assertEq(token.balanceOf(alice), 1_002 ether);
+        assertEq(token.balanceOf(address(lock)), 0);
     }
 
     function test_FlashLoanCappedAtLockAmount() public {
@@ -416,19 +508,20 @@ contract TimeLockTest is Test {
         _borrow(id, 100 ether, 0, MockBorrower.Action.Repay);
         vm.prank(alice);
         vm.expectRevert(TimeLock.AlreadyWithdrawn.selector);
-        lock.setFlashLoanTerms(id, true, 0);
+        lock.setFlashLoanTerms(id, true, address(0), 0);
     }
 
     function test_SetFlashLoanTermsPermissions() public {
         uint256 id = _deposit(100 ether, block.timestamp + 10, bob);
         vm.prank(bob);
-        lock.setFlashLoanTerms(id, true, 0.05 ether);
+        lock.setFlashLoanTerms(id, true, address(stablecoin), 5e6);
         TimeLock.Lock memory l = lock.getLock(id);
         assertTrue(l.flashLoanEnabled);
-        assertEq(l.flashLoanFee, 0.05 ether);
+        assertEq(l.flashLoanFeeToken, address(stablecoin));
+        assertEq(l.flashLoanFee, 5e6);
 
         vm.prank(dave);
         vm.expectRevert(TimeLock.NotDepositorOrWithdrawer.selector);
-        lock.setFlashLoanTerms(id, true, 0);
+        lock.setFlashLoanTerms(id, true, address(0), 0);
     }
 }
