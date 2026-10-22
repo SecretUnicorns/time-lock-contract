@@ -40,14 +40,6 @@ contract MockToken {
     }
 }
 
-contract MockArbSys {
-    uint256 public arbBlockNumber;
-
-    function set(uint256 n) external {
-        arbBlockNumber = n;
-    }
-}
-
 contract TimeLockTest is Test {
     TimeLock lock;
     MockToken token;
@@ -62,13 +54,13 @@ contract TimeLockTest is Test {
         token.approve(address(lock), type(uint256).max);
     }
 
-    function _deposit(uint256 amount, uint256 unlockBlock, address withdrawer) internal returns (uint256) {
+    function _deposit(uint256 amount, uint256 unlockTime, address withdrawer) internal returns (uint256) {
         vm.prank(alice);
-        return lock.deposit(address(token), amount, unlockBlock, withdrawer);
+        return lock.deposit(address(token), amount, unlockTime, withdrawer);
     }
 
     function test_DefaultsWithdrawerToDepositor() public {
-        uint256 id = _deposit(100 ether, block.number + 10, address(0));
+        uint256 id = _deposit(100 ether, block.timestamp + 10, address(0));
         TimeLock.Lock memory l = lock.getLock(id);
         assertEq(l.withdrawer, alice);
         assertEq(l.depositor, alice);
@@ -76,16 +68,16 @@ contract TimeLockTest is Test {
         assertEq(token.balanceOf(address(lock)), 100 ether);
     }
 
-    function test_WithdrawAfterUnlockBlock() public {
-        uint256 unlockBlock = block.number + 10;
-        uint256 id = _deposit(100 ether, unlockBlock, bob);
+    function test_WithdrawAfterUnlockTime() public {
+        uint256 unlockTime = block.timestamp + 10;
+        uint256 id = _deposit(100 ether, unlockTime, bob);
 
-        vm.roll(unlockBlock - 1);
+        vm.warp(unlockTime - 1);
         vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(TimeLock.StillLocked.selector, unlockBlock, unlockBlock - 1));
+        vm.expectRevert(abi.encodeWithSelector(TimeLock.StillLocked.selector, unlockTime, unlockTime - 1));
         lock.withdraw(id);
 
-        vm.roll(unlockBlock);
+        vm.warp(unlockTime);
         vm.prank(bob);
         lock.withdraw(id);
         assertEq(token.balanceOf(bob), 100 ether);
@@ -93,30 +85,32 @@ contract TimeLockTest is Test {
     }
 
     function test_OnlyWithdrawerCanWithdraw() public {
-        uint256 id = _deposit(100 ether, block.number + 1, bob);
-        vm.roll(block.number + 1);
+        uint256 id = _deposit(100 ether, block.timestamp + 1, bob);
+        vm.warp(block.timestamp + 1);
         vm.prank(alice);
         vm.expectRevert(TimeLock.NotWithdrawer.selector);
         lock.withdraw(id);
     }
 
     function test_CannotWithdrawTwice() public {
-        uint256 id = _deposit(100 ether, block.number + 1, address(0));
-        vm.roll(block.number + 1);
+        uint256 id = _deposit(100 ether, block.timestamp + 1, address(0));
+        vm.warp(block.timestamp + 1);
         vm.startPrank(alice);
         lock.withdraw(id);
         vm.expectRevert(TimeLock.AlreadyWithdrawn.selector);
         lock.withdraw(id);
     }
 
-    function test_RevertsOnPastOrCurrentBlock() public {
-        vm.expectRevert(abi.encodeWithSelector(TimeLock.UnlockBlockNotInFuture.selector, block.number, block.number));
-        _deposit(1 ether, block.number, address(0));
+    function test_RevertsOnPastOrCurrentTime() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(TimeLock.UnlockTimeNotInFuture.selector, block.timestamp, block.timestamp)
+        );
+        _deposit(1 ether, block.timestamp, address(0));
     }
 
     function test_RevertsOnZeroAmount() public {
         vm.expectRevert(TimeLock.ZeroAmount.selector);
-        _deposit(0, block.number + 1, address(0));
+        _deposit(0, block.timestamp + 1, address(0));
     }
 
     function test_RevertsOnUnknownLock() public {
@@ -126,14 +120,14 @@ contract TimeLockTest is Test {
 
     function test_FeeOnTransferRecordsReceivedAmount() public {
         token.setFee(100); // 1%
-        uint256 id = _deposit(100 ether, block.number + 1, address(0));
+        uint256 id = _deposit(100 ether, block.timestamp + 1, address(0));
         assertEq(lock.getLock(id).amount, 99 ether);
     }
 
     function test_LocksAreIsolated() public {
-        uint256 a = _deposit(10 ether, block.number + 5, address(0));
-        uint256 b = _deposit(20 ether, block.number + 50, bob);
-        vm.roll(block.number + 5);
+        uint256 a = _deposit(10 ether, block.timestamp + 5, address(0));
+        uint256 b = _deposit(20 ether, block.timestamp + 50, bob);
+        vm.warp(block.timestamp + 5);
         vm.prank(alice);
         lock.withdraw(a);
         assertEq(token.balanceOf(address(lock)), 20 ether);
@@ -142,25 +136,11 @@ contract TimeLockTest is Test {
         lock.withdraw(b);
     }
 
-    function test_UsesArbSysBlockNumberOnArbitrum() public {
-        MockArbSys arb = new MockArbSys();
-        vm.etch(address(100), address(arb).code);
-        MockArbSys(address(100)).set(5_000_000);
-        assertEq(lock.currentBlock(), 5_000_000);
-
-        // Unlock block is compared against the L2 block, not block.number.
-        uint256 id = _deposit(1 ether, 5_000_010, address(0));
-        MockArbSys(address(100)).set(5_000_010);
-        vm.prank(alice);
-        lock.withdraw(id);
-        assertEq(token.balanceOf(alice), 1_000 ether);
-    }
-
     function testFuzz_DepositWithdraw(uint96 amount, uint32 delay) public {
         vm.assume(amount > 0 && amount <= 1_000 ether && delay > 0);
-        uint256 unlockBlock = block.number + delay;
-        uint256 id = _deposit(amount, unlockBlock, bob);
-        vm.roll(unlockBlock);
+        uint256 unlockTime = block.timestamp + delay;
+        uint256 id = _deposit(amount, unlockTime, bob);
+        vm.warp(unlockTime);
         vm.prank(bob);
         lock.withdraw(id);
         assertEq(token.balanceOf(bob), amount);
